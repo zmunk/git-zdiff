@@ -1,0 +1,21 @@
+[package]
+name = "git-difftui"
+version = "0.1.0"
+edition = "2021"
+description = "Single-file, partial-content Git staging terminal UI"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.28"
+ratatui = "0.29"
+similar = "2.6"
+tempfile = "3"
+libc = "0.2"
+xattr = "1"
+
+[dev-dependencies]
+
+[[bin]]
+name = "git-difftui"
+path = "src/main.rs"
