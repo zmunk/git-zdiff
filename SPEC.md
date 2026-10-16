@@ -141,7 +141,7 @@ The corresponding inverse semantics apply to unstaging and discarding.
 - Cursor: neutral full-line background.
 - Multi-line selected rows: subtle background highlighting, distinct from the
   current cursor row.
-- Hunk-mode cursor: highlight the entire hunk without a separate line cursor.
+- Hunk-mode cursor: highlight only actionable rows in the hunk, without a separate line cursor.
 - During multi-line selection, grey out the other tabs.
 - Context-sensitive footer:
   - Working: `Stage selection`, with discard availability discoverable.
@@ -160,7 +160,8 @@ The corresponding inverse semantics apply to unstaging and discarding.
 | `j` / `k` | Move down/up according to the active navigation mode |
 | `Space` | Stage in Working; unstage in Staged |
 | `v` | Enter multi-line selection from single-line mode |
-| `Esc` | Cancel multi-line selection and return to single-line mode |
+| `Esc` | Cancel multi-line selection; otherwise center the cursor vertically |
+| `Ctrl-U` / `Ctrl-D` | Scroll up/down half a viewport without moving the cursor |
 | `d` | Request discard in Working |
 | `q` | Quit without further mutations |
 
@@ -174,7 +175,7 @@ The corresponding inverse semantics apply to unstaging and discarding.
 - When no actionable changes exist, show the available content/empty state without
   a change cursor; mutation keys do nothing.
 
-### Line mode: single (default)
+### Line mode: single
 
 - Highlight exactly one changed row as the cursor.
 - `j`/`k` moves between changed rows, skipping unchanged text.
@@ -192,10 +193,10 @@ The corresponding inverse semantics apply to unstaging and discarding.
 - On successful submission, return to single-line mode.
 - `Esc` cancels the selection without modifying any content.
 
-### Hunk mode
+### Hunk mode (default)
 
 - `j`/`k` moves between hunks.
-- Highlight the entire current hunk, without a separate line cursor.
+- Highlight only actionable rows in the current hunk, without a separate line cursor.
 - `Space` stages/unstages all changed rows in the current hunk.
 - Context in the hunk is not itself acted on.
 - `d` in Working requests discard of all unstaged changes in the current hunk.
@@ -210,10 +211,14 @@ The corresponding inverse semantics apply to unstaging and discarding.
 
 ### Cursor retention
 
-After a mutation or refresh, preserve focus on the same logical change wherever
-possible. If it no longer exists, focus the nearest remaining actionable change.
-Do not blindly retain a row number when inserted or removed rows have shifted
-logical positions. If no changes remain, remove the change cursor.
+After a successful submission, focus the first remaining actionable row below the
+submitted range, or the previous actionable row above if none remain below. If no
+changes remain, remove the cursor and display a completion message. After an external
+refresh, preserve focus on the same logical change wherever possible, falling back
+to the nearest actionable change. Do not blindly retain a row number when rows shift.
+Manual half-page scrolling must persist across redraws without moving the cursor.
+Cursor navigation ensures visibility; Escape outside multi-line selection centers
+the cursor (as near the top of the file as available content allows).
 
 ## Discard confirmation
 

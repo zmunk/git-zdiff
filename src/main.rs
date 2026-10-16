@@ -55,6 +55,11 @@ fn run() -> Result<()> {
                     && key.modifiers.contains(KeyModifiers::CONTROL)
                 {
                     Intent::Quit
+                } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('u' | 'd'))
+                {
+                    app.scroll_page(key.code == KeyCode::Char('d'));
+                    Intent::None
                 } else {
                     app.key(key.code)
                 };
@@ -64,13 +69,7 @@ fn run() -> Result<()> {
                     Intent::Mutate(request) => {
                         match repo.mutate(&request.snapshot, request.operation, &request.selected) {
                             Ok(snapshot) => {
-                                app.cancel_selection();
-                                app.replace(snapshot);
-                                app.message = format!(
-                                    "{:?}: {} changed row(s) applied",
-                                    request.operation,
-                                    request.selected.len()
-                                );
+                                app.submitted(snapshot, &request);
                             }
                             Err(error) => {
                                 app.cancel_selection();

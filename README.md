@@ -10,9 +10,10 @@ from your repository context. Install with `cargo install --path .`.
 
 - `[` / `]`: Working / Staged / Preview
 - `j` / `k` (or arrows): next/previous change; scroll in Preview
-- `Tab`: line/hunk mode
+- `Tab`: line/hunk mode (hunk mode by default)
 - `v`: anchored multi-line selection; cannot cross unchanged text
-- `Esc`: cancel selection
+- `Ctrl-U` / `Ctrl-D`: scroll half a page without moving the cursor
+- `Esc`: cancel selection, or center the cursor when not selecting
 - `Space`: stage (Working) or unstage (Staged)
 - `d`: request discard in Working; only `y` confirms, `n`/`Esc` cancels
 - Left/right arrows: horizontal scroll
@@ -20,7 +21,9 @@ from your repository context. Install with `cargo install --path .`.
 
 Changes apply immediately. There is no commit or save step. Working compares the
 index with disk, Staged compares HEAD with the index, and Preview shows the index.
-Replacement deletions and additions are independently selectable.
+Replacement deletions and additions are independently selectable. Submission focuses
+the next remaining change below, falling back upward; a message indicates completion.
+Hunk highlighting includes only changed rows, not context.
 
 ## Safety and scope
 

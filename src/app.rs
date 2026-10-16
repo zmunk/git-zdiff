@@ -19,14 +19,16 @@ pub struct Nav {
     pub mode: Mode,
     pub anchor: Option<usize>,
     pub scroll: usize,
+    pub follow_cursor: bool,
 }
 impl Default for Nav {
     fn default() -> Self {
         Self {
             cursor: None,
-            mode: Mode::Line,
+            mode: Mode::Hunk,
             anchor: None,
             scroll: 0,
+            follow_cursor: true,
         }
     }
 }
@@ -51,6 +53,7 @@ pub struct App {
     pub message: String,
     pub valid: bool,
     pub confirmation: Option<Request>,
+    pub viewport_height: usize,
 }
 impl App {
     pub fn new(snapshot: Snapshot) -> Self {
@@ -72,6 +75,7 @@ impl App {
             message: String::new(),
             valid: true,
             confirmation: None,
+            viewport_height: 0,
         }
     }
     pub fn selecting(&self) -> bool {
@@ -98,6 +102,53 @@ impl App {
         }
         self.snapshot = snapshot;
         self.valid = true;
+    }
+    pub fn submitted(&mut self, snapshot: Snapshot, request: &Request) {
+        let tab = self.tab;
+        let diff = &self.diffs[tab];
+        let next = request.selected.last().and_then(|last| {
+            (last + 1..diff.rows.len())
+                .find(|i| diff.actionable(*i))
+                .or_else(|| {
+                    (0..*request.selected.first().unwrap())
+                        .rev()
+                        .find(|i| diff.actionable(*i))
+                })
+        });
+        // Retain the next surviving change, not the just-submitted cursor.
+        self.nav[tab].cursor = next;
+        self.cancel_selection();
+        self.replace(snapshot);
+        self.nav[tab].follow_cursor = true;
+        self.message = format!(
+            "{:?}: {} changed row(s) applied",
+            request.operation,
+            request.selected.len()
+        );
+        if self.nav[tab].cursor.is_none() {
+            self.message
+                .push_str(" — All changes submitted; no remaining changes in this view");
+        }
+    }
+    pub fn scroll_page(&mut self, down: bool) {
+        let amount = (self.viewport_height / 2).max(1);
+        let (scroll, len) = if self.tab == 2 {
+            (
+                &mut self.preview_scroll,
+                self.snapshot.index.lines().count(),
+            )
+        } else {
+            self.nav[self.tab].follow_cursor = false;
+            (
+                &mut self.nav[self.tab].scroll,
+                self.diffs[self.tab].rows.len(),
+            )
+        };
+        *scroll = if down {
+            scroll.saturating_add(amount).min(len.saturating_sub(1))
+        } else {
+            scroll.saturating_sub(amount)
+        };
     }
     pub fn cancel_selection(&mut self) {
         for nav in &mut self.nav {
@@ -141,6 +192,9 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Esc => {
                     self.confirmation = None;
                     self.message = "Discard cancelled".into();
+                    if key == KeyCode::Esc && !self.selecting() {
+                        return self.key(KeyCode::Esc);
+                    }
                 }
                 _ => {}
             }
@@ -168,10 +222,17 @@ impl App {
             }
             _ if self.tab == 2 => {}
             KeyCode::Esc => {
-                self.nav[self.tab].anchor = None;
+                let nav = &mut self.nav[self.tab];
+                if nav.anchor.take().is_none() {
+                    if let Some(cursor) = nav.cursor {
+                        nav.scroll = cursor.saturating_sub(self.viewport_height / 2);
+                        nav.follow_cursor = false;
+                    }
+                }
             }
             KeyCode::Tab if !self.selecting() => {
                 let nav = &mut self.nav[self.tab];
+                nav.follow_cursor = true;
                 nav.mode = if nav.mode == Mode::Line {
                     Mode::Hunk
                 } else {
@@ -240,6 +301,7 @@ impl App {
         if next.is_some() {
             nav.cursor = next;
         }
+        nav.follow_cursor = true;
     }
     pub fn draw(&mut self, frame: &mut Frame, name: &str) {
         let area = frame.area();
@@ -289,6 +351,7 @@ impl App {
             regions[1],
         );
         let body = regions[2];
+        self.viewport_height = body.height as usize;
         if self.tab == 2 {
             let lines: Vec<_> = self.snapshot.index.split_inclusive('\n').collect();
             self.preview_scroll = self.preview_scroll.min(lines.len().saturating_sub(1));
@@ -326,12 +389,7 @@ impl App {
                 .cursor
                 .and_then(|i| diff.hunk(i))
                 .map(|h| diff.hunks[h].clone());
-            let focus = if nav.mode == Mode::Hunk {
-                hunk.as_ref().map(|h| h.start)
-            } else {
-                nav.cursor
-            };
-            if let Some(cursor) = focus {
+            if let Some(cursor) = nav.cursor.filter(|_| nav.follow_cursor) {
                 if cursor < nav.scroll {
                     nav.scroll = cursor;
                 }
@@ -339,9 +397,7 @@ impl App {
                     nav.scroll = cursor.saturating_sub(body.height.saturating_sub(1) as usize);
                 }
             }
-            nav.scroll = nav
-                .scroll
-                .min(diff.rows.len().saturating_sub(body.height as usize));
+            nav.scroll = nav.scroll.min(diff.rows.len().saturating_sub(1));
             let scroll = nav.scroll;
             if diff.rows.is_empty() {
                 frame.render_widget(Paragraph::new("Empty file — no content changes"), body);
@@ -363,7 +419,10 @@ impl App {
                 if let Some(color) = color {
                     style = style.fg(color);
                 }
-                if nav.mode == Mode::Hunk && hunk.as_ref().is_some_and(|h| h.contains(&i)) {
+                if nav.mode == Mode::Hunk
+                    && diff.actionable(i)
+                    && hunk.as_ref().is_some_and(|h| h.contains(&i))
+                {
                     style = style.bg(Color::Rgb(55, 55, 55));
                 } else if nav.cursor == Some(i) {
                     style = style.bg(Color::Rgb(65, 65, 65));
@@ -396,7 +455,7 @@ impl App {
         let mut lines = vec![
             Line::raw(footer),
             Line::raw(
-                "j/k: move  [/]: tabs  Tab: line/hunk  v: select  Esc: cancel  ←/→: pan  q: quit",
+                "j/k: move  [/]: tabs  Tab: line/hunk  v: select  Esc: cancel/center  Ctrl-U/D: scroll  ←/→: pan  q: quit",
             ),
         ];
         if let Some(request) = &self.confirmation {
@@ -488,6 +547,7 @@ mod tests {
     #[test]
     fn selection_is_bounded_and_blocks_switching() {
         let mut a = app();
+        a.key(KeyCode::Tab);
         key(&mut a, 'v');
         for _ in 0..20 {
             key(&mut a, 'j');
@@ -506,13 +566,15 @@ mod tests {
     #[test]
     fn tab_local_state_hunks_and_preview() {
         let mut a = app();
+        assert_eq!(a.nav[0].mode, Mode::Hunk);
+        a.key(KeyCode::Tab);
         key(&mut a, 'j');
         let cursor = a.nav[0].cursor;
         a.key(KeyCode::Tab);
         assert_eq!(a.nav[0].mode, Mode::Hunk);
         assert!(a.selected().len() > 1);
         key(&mut a, ']');
-        assert_eq!(a.nav[1].mode, Mode::Line);
+        assert_eq!(a.nav[1].mode, Mode::Hunk);
         assert_eq!(a.nav[1].cursor, None);
         key(&mut a, ']');
         assert!(matches!(a.key(KeyCode::Char(' ')), Intent::None));
@@ -568,6 +630,89 @@ mod tests {
         .enumerate()
         {
             assert_eq!(format!("{:?}", a.diffs[i]), format!("{expected:?}"));
+        }
+    }
+    fn submit(a: &mut App) {
+        let Intent::Mutate(request) = a.key(KeyCode::Char(' ')) else {
+            panic!("expected mutation");
+        };
+        let mut snapshot = a.snapshot.clone();
+        snapshot.index = a.diffs[a.tab].apply(&request.selected, a.tab == 1);
+        a.submitted(snapshot, &request);
+    }
+    #[test]
+    fn submissions_advance_down_then_up_in_both_views() {
+        for tab in 0..2 {
+            let mut a = app();
+            if tab == 1 {
+                a.snapshot.index = a.snapshot.work.clone();
+                a = App::new(a.snapshot);
+            }
+            a.tab = tab;
+            a.nav[tab].mode = Mode::Line;
+            // The nearest change is above, but submission must prefer below.
+            a.nav[tab].cursor = Some(3);
+            submit(&mut a);
+            let cursor = a.nav[tab].cursor.unwrap();
+            assert_eq!(a.diffs[tab].rows[cursor].text, "d\n");
+            // At the last change, fall back to the previous remaining row.
+            a.nav[tab].cursor = a.diffs[tab]
+                .rows
+                .iter()
+                .rposition(|r| r.kind != Kind::Context);
+            submit(&mut a);
+            let cursor = a.nav[tab].cursor.unwrap();
+            assert_eq!(a.diffs[tab].rows[cursor].text, "d\n");
+            a.nav[tab].mode = Mode::Hunk;
+            submit(&mut a);
+            assert_eq!(a.nav[tab].cursor, None);
+            assert!(a.message.contains("All changes submitted"));
+        }
+    }
+    #[test]
+    fn scrolling_leaves_cursor_and_selection_unchanged_and_escape_centers() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut a = app();
+        let text = (0..100).map(|i| format!("line {i}\n")).collect::<String>();
+        let mut snapshot = a.snapshot.clone();
+        snapshot.index = text.clone();
+        snapshot.head = text.clone();
+        snapshot.work = text.replace("line 50\n", "changed\n");
+        a.replace(snapshot);
+        let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
+        terminal.draw(|f| a.draw(f, "test")).unwrap();
+        let cursor = a.nav[0].cursor;
+        let scroll = a.nav[0].scroll;
+        let half = a.viewport_height / 2;
+        a.scroll_page(false);
+        terminal.draw(|f| a.draw(f, "test")).unwrap();
+        assert_eq!(a.nav[0].scroll, scroll - half);
+        assert_eq!(a.nav[0].cursor, cursor);
+        a.scroll_page(true);
+        assert_eq!(a.nav[0].scroll, scroll);
+        a.key(KeyCode::Esc);
+        terminal.draw(|f| a.draw(f, "test")).unwrap();
+        assert_eq!(a.nav[0].scroll, cursor.unwrap() - a.viewport_height / 2);
+        a.key(KeyCode::Tab);
+        key(&mut a, 'v');
+        let selected = a.selected();
+        a.scroll_page(true);
+        assert_eq!(a.selected(), selected);
+        let scroll = a.nav[0].scroll;
+        a.key(KeyCode::Esc);
+        assert!(!a.selecting());
+        assert_eq!(a.nav[0].scroll, scroll);
+    }
+    #[test]
+    fn hunk_highlight_excludes_context() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut a = app();
+        let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
+        terminal.draw(|f| a.draw(f, "test")).unwrap();
+        let buffer = terminal.backend().buffer();
+        for (i, row) in a.diffs[0].rows.iter().enumerate() {
+            let bg = buffer[(0, i as u16 + 2)].bg;
+            assert_eq!(bg == Color::Rgb(55, 55, 55), row.kind != Kind::Context);
         }
     }
     #[test]
