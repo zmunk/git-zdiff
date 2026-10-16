@@ -1,5 +1,5 @@
 [package]
-name = "git-difftui"
+name = "git-zdiff"
 version = "0.1.0"
 edition = "2021"
 description = "Single-file, partial-content Git staging terminal UI"
@@ -17,5 +17,5 @@ xattr = "1"
 [dev-dependencies]
 
 [[bin]]
-name = "git-difftui"
+name = "git-zdiff"
 path = "src/main.rs"
