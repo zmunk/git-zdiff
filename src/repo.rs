@@ -1,6 +1,7 @@
 use crate::diff::Diff;
 use anyhow::{anyhow, bail, Context, Result};
 use std::{
+    cell::RefCell,
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -33,12 +34,43 @@ pub enum Operation {
     Unstage,
     Discard,
 }
+// Include ctime as well as mtime: same-size rewrites and atomic replacements
+// must invalidate the working copy, even when the mtime is preserved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorkStamp {
+    dev: u64,
+    ino: u64,
+    mode: u32,
+    size: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+impl WorkStamp {
+    fn of(meta: &fs::Metadata) -> Self {
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            mode: meta.mode(),
+            size: meta.len(),
+            mtime: (meta.mtime(), meta.mtime_nsec()),
+            ctime: (meta.ctime(), meta.ctime_nsec()),
+        }
+    }
+}
+struct Cache {
+    snapshot: Snapshot,
+    work_stamp: WorkStamp,
+    config: Vec<u8>,
+}
 pub struct Repo {
     cwd: PathBuf,
     pub path: PathBuf,
     relative: String,
     spec: String,
     index_path: PathBuf,
+    cache: RefCell<Option<Cache>>,
+    #[cfg(test)]
+    reads: std::cell::Cell<(usize, usize)>, // blob reads, working-file reads
 }
 fn output(mut cmd: Command, input: Option<&[u8]>) -> Result<Vec<u8>> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -137,6 +169,9 @@ impl Repo {
             spec: format!(":(top,literal){relative}"),
             relative,
             index_path,
+            cache: RefCell::new(None),
+            #[cfg(test)]
+            reads: std::cell::Cell::new((0, 0)),
         };
         repo.snapshot()?;
         Ok(repo)
@@ -150,13 +185,36 @@ impl Repo {
         output(self.command(args), None)
     }
     fn blob(&self, oid: &str) -> Result<String> {
+        if let Some(cache) = self.cache.borrow().as_ref() {
+            if oid == cache.snapshot.head_oid {
+                return Ok(cache.snapshot.head.clone());
+            }
+            if oid == cache.snapshot.index_oid {
+                return Ok(cache.snapshot.index.clone());
+            }
+        }
+        #[cfg(test)]
+        self.reads.set((self.reads.get().0 + 1, self.reads.get().1));
         text(self.git(&["cat-file", "blob", oid])?)
     }
     fn head_tree(&self) -> Result<Vec<u8>> {
         self.git(&["ls-tree", "--full-tree", "-z", "HEAD", "--", &self.spec])
             .context("Cannot read the committed baseline (HEAD): newly added files and repositories without commits are unsupported; commit the file before opening it")
     }
+    pub fn cached_snapshot(&self) -> Snapshot {
+        self.cache
+            .borrow()
+            .as_ref()
+            .expect("Repo::open loads the snapshot")
+            .snapshot
+            .clone()
+    }
     pub fn snapshot(&self) -> Result<Snapshot> {
+        self.refresh(false)
+    }
+    // Mutations never trust a metadata-only check of the working file. Git
+    // entries and transformation settings are checked on every refresh too.
+    fn refresh(&self, validate: bool) -> Result<Snapshot> {
         let entries = self.git(&["ls-files", "--stage", "-z", "--", &self.spec])?;
         if entries.is_empty() {
             // Distinguish staged deletion from a genuinely untracked file.
@@ -221,28 +279,50 @@ impl Repo {
                 );
             }
         }
-        let work = text(fs::read(&self.path)?)?;
-        // Reject implicit core.autocrlf conversion too, but permit byte-exact CRLF.
-        let raw = output(
-            self.command(&["hash-object", "--no-filters", "--stdin"]),
-            Some(work.as_bytes()),
-        )?;
-        let filtered = output(
-            self.command(&[
-                "hash-object",
-                &format!("--path={}", self.path.display()),
-                "--stdin",
-            ]),
-            Some(work.as_bytes()),
-        )?;
-        if raw != filtered {
-            bail!(
-                "Unsupported text representation: Git clean/EOL conversion would change the file"
-            );
-        }
-        Ok(Snapshot {
-            head: self.blob(tree_fields[2])?,
-            index: self.blob(fields[1])?,
+        // Configuration and attributes can change while the application runs.
+        // check-attr above validates effective attributes (including global and
+        // info attributes); config includes includes and environment overrides.
+        let config = self.git(&["config", "--null", "--list"])?;
+        let work_stamp = WorkStamp::of(&meta);
+        let cached_work = self.cache.borrow().as_ref().and_then(|cache| {
+            (!validate && cache.work_stamp == work_stamp && cache.config == config)
+                .then(|| cache.snapshot.work.clone())
+        });
+        let work = if let Some(work) = cached_work {
+            work
+        } else {
+            #[cfg(test)]
+            self.reads.set((self.reads.get().0, self.reads.get().1 + 1));
+            let work = text(fs::read(&self.path)?)?;
+            // Reject implicit core.autocrlf conversion too, but permit byte-exact CRLF.
+            let raw = output(
+                self.command(&["hash-object", "--no-filters", "--stdin"]),
+                Some(work.as_bytes()),
+            )?;
+            let filtered = output(
+                self.command(&[
+                    "hash-object",
+                    &format!("--path={}", self.path.display()),
+                    "--stdin",
+                ]),
+                Some(work.as_bytes()),
+            )?;
+            if raw != filtered {
+                bail!(
+                    "Unsupported text representation: Git clean/EOL conversion would change the file"
+                );
+            }
+            work
+        };
+        let head = self.blob(tree_fields[2])?;
+        let index = if fields[1] == tree_fields[2] {
+            head.clone()
+        } else {
+            self.blob(fields[1])?
+        };
+        let snapshot = Snapshot {
+            head,
+            index,
             work,
             head_oid: tree_fields[2].to_owned(),
             index_oid: fields[1].to_owned(),
@@ -250,7 +330,13 @@ impl Repo {
             dev: meta.dev(),
             ino: meta.ino(),
             permissions: meta.mode(),
-        })
+        };
+        *self.cache.borrow_mut() = Some(Cache {
+            snapshot: snapshot.clone(),
+            work_stamp,
+            config,
+        });
+        Ok(snapshot)
     }
     pub fn mutate(
         &self,
@@ -268,7 +354,7 @@ impl Repo {
         lock_name.push(".lock");
         let lock_path = PathBuf::from(lock_name);
         let mut lock = IndexLock::acquire(lock_path)?;
-        let current = self.snapshot()?;
+        let current = self.refresh(true)?;
         if &current != expected {
             bail!("External change detected; action cancelled. Review the refreshed selection.");
         }
@@ -282,6 +368,7 @@ impl Repo {
             bail!("Selection is no longer valid");
         }
         let content = diff.apply(selected, !matches!(op, Operation::Stage));
+        let mut updated = current.clone();
         if matches!(op, Operation::Discard) {
             let mut file = OpenOptions::new()
                 .read(true)
@@ -294,7 +381,7 @@ impl Repo {
             if meta.dev() != current.dev
                 || meta.ino() != current.ino
                 || bytes != current.work.as_bytes()
-                || self.snapshot()? != current
+                || self.refresh(true)? != current
             {
                 bail!("External change detected during discard; action cancelled");
             }
@@ -323,13 +410,21 @@ impl Repo {
                 }
             }
             replacement.as_file().sync_all()?;
-            if self.snapshot()? != current {
+            if self.refresh(true)? != current {
                 bail!("External change detected during discard; action cancelled");
             }
+            let published_meta = replacement.as_file().metadata()?;
             replacement
                 .persist(&self.path)
                 .map_err(|e| e.error)
                 .context("Cannot publish discarded content")?;
+            updated.work = content;
+            updated.dev = published_meta.dev();
+            updated.ino = published_meta.ino();
+            updated.permissions = published_meta.mode();
+            // Use the pre-publication stamp, not a later stat which could belong
+            // to an external writer. A rename ctime change may cause one reread.
+            self.cache.borrow_mut().as_mut().unwrap().work_stamp = WorkStamp::of(&published_meta);
         } else {
             let parent = self.index_path.parent().context("Invalid index path")?;
             let temp = tempfile::Builder::new()
@@ -348,7 +443,7 @@ impl Repo {
             let mut cmd = self.command(&["update-index", "-z", "--index-info"]);
             cmd.env("GIT_INDEX_FILE", temp.path());
             output(cmd, Some(record.as_bytes()))?;
-            if self.snapshot()? != current {
+            if self.refresh(true)? != current {
                 bail!("External change detected during operation; action cancelled");
             }
             lock.file
@@ -358,9 +453,13 @@ impl Repo {
             lock.file.sync_all()?;
             fs::rename(&lock.path, &self.index_path).context("Cannot publish updated index")?;
             lock.published = true;
+            updated.index = content;
+            updated.index_oid = oid.to_owned();
         }
-        self.snapshot()
-            .context("Operation completed, but refresh failed")
+        // Publication succeeded: we already know the exact new content. Keep
+        // other components and their validation stamps; no post-write snapshot.
+        self.cache.borrow_mut().as_mut().unwrap().snapshot = updated.clone();
+        Ok(updated)
     }
 }
 struct IndexLock {

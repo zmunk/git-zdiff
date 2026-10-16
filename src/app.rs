@@ -81,15 +81,22 @@ impl App {
         self.selecting() || self.confirmation.is_some()
     }
     pub fn replace(&mut self, snapshot: Snapshot) {
-        let diffs = [
-            Diff::between(&snapshot.index, &snapshot.work),
-            Diff::between(&snapshot.head, &snapshot.index),
+        let changed = [
+            snapshot.index != self.snapshot.index || snapshot.work != self.snapshot.work,
+            snapshot.head != self.snapshot.head || snapshot.index != self.snapshot.index,
         ];
-        for (i, diff) in diffs.iter().enumerate() {
-            self.nav[i].cursor = diff.retain_cursor(&self.diffs[i], self.nav[i].cursor);
+        for (i, changed) in changed.into_iter().enumerate() {
+            if changed {
+                let diff = if i == 0 {
+                    Diff::between(&snapshot.index, &snapshot.work)
+                } else {
+                    Diff::between(&snapshot.head, &snapshot.index)
+                };
+                self.nav[i].cursor = diff.retain_cursor(&self.diffs[i], self.nav[i].cursor);
+                self.diffs[i] = diff;
+            }
         }
         self.snapshot = snapshot;
-        self.diffs = diffs;
         self.valid = true;
     }
     pub fn cancel_selection(&mut self) {
@@ -523,6 +530,45 @@ mod tests {
         assert!(a.confirmation.is_none());
         key(&mut a, 'd');
         assert!(matches!(a.key(KeyCode::Char('y')), Intent::Mutate(_)));
+    }
+    #[test]
+    fn refresh_reuses_unaffected_diffs() {
+        let mut a = app();
+        let working_rows = a.diffs[0].rows.as_ptr();
+        let staged_rows = a.diffs[1].rows.as_ptr();
+        let mut snapshot = a.snapshot.clone();
+        snapshot.permissions = 0o644;
+        a.replace(snapshot);
+        assert_eq!(a.diffs[0].rows.as_ptr(), working_rows);
+        assert_eq!(a.diffs[1].rows.as_ptr(), staged_rows);
+
+        let mut snapshot = a.snapshot.clone();
+        snapshot.work = "external\n".into();
+        a.replace(snapshot);
+        assert_ne!(a.diffs[0].rows.as_ptr(), working_rows);
+        assert_eq!(a.diffs[1].rows.as_ptr(), staged_rows);
+        let working_rows = a.diffs[0].rows.as_ptr();
+        let mut snapshot = a.snapshot.clone();
+        snapshot.head = "committed\n".into();
+        a.replace(snapshot);
+        assert_eq!(a.diffs[0].rows.as_ptr(), working_rows);
+        assert_ne!(a.diffs[1].rows.as_ptr(), staged_rows);
+
+        let staged_rows = a.diffs[1].rows.as_ptr();
+        let mut snapshot = a.snapshot.clone();
+        snapshot.index = "staged\n".into();
+        a.replace(snapshot);
+        assert_ne!(a.diffs[0].rows.as_ptr(), working_rows);
+        assert_ne!(a.diffs[1].rows.as_ptr(), staged_rows);
+        for (i, expected) in [
+            Diff::between(&a.snapshot.index, &a.snapshot.work),
+            Diff::between(&a.snapshot.head, &a.snapshot.index),
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(format!("{:?}", a.diffs[i]), format!("{expected:?}"));
+        }
     }
     #[test]
     fn logical_cursor_and_empty_state() {

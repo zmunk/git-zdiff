@@ -38,6 +38,92 @@ impl Fixture {
     }
 }
 #[test]
+fn cached_refresh_loads_only_changed_components() {
+    let f = Fixture::new("old\n");
+    assert_eq!(f.repo.reads.get(), (1, 1));
+    let initial = f.repo.cached_snapshot();
+    assert_eq!(f.state(), initial);
+    assert_eq!(f.repo.reads.get(), (1, 1));
+
+    f.work("new\n");
+    assert_eq!(f.state().work, "new\n");
+    assert_eq!(f.repo.reads.get(), (1, 2));
+    git(f.dir.path(), &["add", "file"]);
+    assert_eq!(f.state().index, "new\n");
+    assert_eq!(f.repo.reads.get(), (2, 2));
+    let old_head = git(f.dir.path(), &["rev-parse", "HEAD"]);
+    git(f.dir.path(), &["commit", "-qm", "external commit"]);
+    assert_eq!(f.state().head, "new\n");
+    // HEAD now names the cached index blob.
+    assert_eq!(f.repo.reads.get(), (2, 2));
+    git(f.dir.path(), &["update-ref", "HEAD", old_head.trim()]);
+    assert_eq!(f.state().head, "old\n");
+    assert_eq!(f.repo.reads.get(), (3, 2));
+
+    let captured = f.state();
+    fs::write(f.dir.path().join("other"), "external\n").unwrap();
+    git(f.dir.path(), &["add", "other"]);
+    assert_eq!(f.state(), captured);
+    assert_eq!(f.repo.reads.get(), (3, 2));
+}
+
+#[test]
+fn successful_mutations_publish_known_content_to_cache() {
+    let f = Fixture::new("old\n");
+    f.work("new\n");
+    let before = f.state();
+    let reads = f.repo.reads.get();
+    let staged = f.repo.mutate(&before, Operation::Stage, &[0, 1]).unwrap();
+    assert_eq!(f.repo.cached_snapshot(), staged);
+    assert_eq!(staged.index, "new\n");
+    assert_eq!(f.repo.reads.get(), (reads.0, reads.1 + 2));
+    assert_eq!(f.state(), staged);
+    assert_eq!(f.repo.reads.get(), (reads.0, reads.1 + 2));
+
+    let unstaged = f.repo.mutate(&staged, Operation::Unstage, &[0, 1]).unwrap();
+    assert_eq!(f.repo.cached_snapshot(), unstaged);
+    assert_eq!(unstaged.index, "old\n");
+    assert_eq!(f.repo.reads.get().0, reads.0);
+    let discarded = f
+        .repo
+        .mutate(&unstaged, Operation::Discard, &[0, 1])
+        .unwrap();
+    assert_eq!(f.repo.cached_snapshot(), discarded);
+    assert_eq!(discarded.work, "old\n");
+    assert_eq!(discarded.index, unstaged.index);
+    assert_eq!(discarded.ino, fs::metadata(&f.repo.path).unwrap().ino());
+    assert_eq!(f.repo.reads.get().0, reads.0);
+    assert_eq!(f.state(), discarded);
+}
+
+#[test]
+fn mutation_validation_does_not_trust_cached_work_stamp() {
+    let f = Fixture::new("old\n");
+    f.work("new\n");
+    let captured = f.state();
+    f.work("bad\n");
+    // Simulate a metadata-only detector missing an external write.
+    f.repo.cache.borrow_mut().as_mut().unwrap().work_stamp =
+        WorkStamp::of(&fs::metadata(&f.repo.path).unwrap());
+    assert!(f.repo.mutate(&captured, Operation::Stage, &[0, 1]).is_err());
+    assert_eq!(git(f.dir.path(), &["show", ":file"]), "old\n");
+    assert!(!f.dir.path().join(".git/index.lock").exists());
+}
+
+#[test]
+fn cached_work_is_revalidated_after_config_changes() {
+    let f = Fixture::new("old\n");
+    let reads = f.repo.reads.get();
+    git(f.dir.path(), &["config", "core.autocrlf", "input"]);
+    assert_eq!(f.state().work, "old\n");
+    assert_eq!(f.repo.reads.get(), (reads.0, reads.1 + 1));
+    f.work("old\r\n");
+    assert!(f.repo.snapshot().is_err());
+    git(f.dir.path(), &["config", "core.autocrlf", "false"]);
+    assert_eq!(f.state().work, "old\r\n");
+}
+
+#[test]
 fn stage_and_unstage_independent_replacement_rows() {
     let f = Fixture::new("old\n");
     f.work("new\n");
@@ -229,9 +315,15 @@ fn unborn_head_reports_required_committed_baseline_without_mutation() {
     let index_before = fs::read(dir.path().join(".git/index")).unwrap();
     let error = Repo::open(dir.path(), Path::new("hi")).err().unwrap();
     let message = format!("{error:#}");
-    assert!(message.contains("repositories without commits"), "{message}");
+    assert!(
+        message.contains("repositories without commits"),
+        "{message}"
+    );
     assert!(message.contains("commit the file before opening it"));
-    assert_eq!(fs::read(dir.path().join(".git/index")).unwrap(), index_before);
+    assert_eq!(
+        fs::read(dir.path().join(".git/index")).unwrap(),
+        index_before
+    );
     assert_eq!(fs::read(file).unwrap(), b"");
     assert!(!dir.path().join(".git/index.lock").exists());
 }

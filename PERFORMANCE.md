@@ -1,5 +1,28 @@
 # Performance Analysis: git-difftui
 
+## Implemented snapshot caching
+
+`Repo::open` loads HEAD, INDEX and WORKTREE once; the UI uses that cached
+snapshot and keeps both computed diffs. Successful stage/unstage updates the
+cached index content and OID, and invalidates both UI diffs. Discard updates
+cached working content and inode metadata, invalidating only the working diff.
+Neither operation takes a post-publication full snapshot.
+
+Polling still queries the target's HEAD/index entries, effective attributes and
+Git configuration. Immutable blobs are reused by OID. Working bytes and clean/EOL
+hash checks are reused while device, inode, mode, size, nanosecond mtime/ctime and
+configuration remain unchanged. External changes reload only affected content;
+unrelated index updates do not invalidate target content. A discard rename may
+cause one additional working-file read because it changes ctime.
+
+Mutation validation deliberately bypasses the working-file metadata cache and
+rechecks bytes and transformation rules before publication. The real index lock
+still spans validation, copying the latest index and atomic publication, so
+unrelated staged entries are preserved. Attributes/configuration/HEAD are not
+assumed constant during a session.
+
+The analysis and alternative optimization proposals below predate this change.
+
 ## Problem
 
 Each stage/unstage/discard operation has a noticeable delay. The UI feels sluggish
@@ -92,19 +115,20 @@ reconstruction.
 - Use a file watcher (`inotify` on Linux, `kqueue` on macOS) or poll
   `git status --porcelain` to detect external changes.
 - Only run a full re-snapshot when something external actually changed.
-- Eliminates pre-validation and post-mutation snapshot calls entirely. The
-  snapshot carried in the `Request` is already validated at mutation time.
+- Eliminates post-mutation snapshot calls. Pre-mutation validation must remain:
+  a captured `Request` alone cannot establish that external state is unchanged.
 
 **Saves:** 2 full snapshots (~14 git processes) per mutation.
 
 ### 5. Run expensive checks once at startup, not per-refresh
 
-Move these from `snapshot()` to `open()`:
+These checks can be cached only with appropriate external-change detection
+(the current implementation continues checking HEAD and attributes each poll):
 
-- `git check-attr` — text transformation attributes don't change at runtime.
-- Double-hash of working file (with/without filters) — same reasoning.
-- `git ls-tree HEAD` — HEAD doesn't change during a session (no commits are
-  made inside the tool).
+- `git check-attr` — attributes may be edited externally, including global rules.
+- Double-hash of working file (with/without filters) — invalidate on working
+  content or effective configuration changes; always recheck before mutations.
+- `git ls-tree HEAD` — external commits, resets and branch switches can change HEAD.
 
 **Saves:** 3 git processes per snapshot.
 

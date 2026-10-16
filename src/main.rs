@@ -30,7 +30,7 @@ fn run() -> Result<()> {
     }
     let cwd = std::env::current_dir()?.canonicalize()?;
     let repo = repo::Repo::open(&cwd, &PathBuf::from(&args[0]))?;
-    let mut app = App::new(repo.snapshot()?);
+    let mut app = App::new(repo.cached_snapshot());
     let name = args[0].to_string_lossy();
     enable_raw_mode().context("Cannot enter terminal raw mode")?;
     let _guard = TerminalGuard;
