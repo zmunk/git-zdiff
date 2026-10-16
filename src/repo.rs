@@ -61,6 +61,7 @@ struct Cache {
     snapshot: Snapshot,
     work_stamp: WorkStamp,
     config: Vec<u8>,
+    attrs: Vec<u8>,
 }
 pub struct Repo {
     cwd: PathBuf,
@@ -257,8 +258,9 @@ impl Repo {
         if (meta.mode() & 0o111 != 0) != (mode == "100755") {
             bail!("File-mode changes are unsupported");
         }
-        // Transforming attributes would make raw index bytes differ from the
-        // displayed filesystem representation. Refuse rather than corrupt them.
+        // Refuse transformations we cannot safely represent. Text normalization
+        // is allowed only when the byte comparison below proves it is a no-op;
+        // CRLF checkout conversion is still unsupported.
         let attrs = self.git(&[
             "check-attr",
             "-z",
@@ -270,9 +272,11 @@ impl Repo {
             "--",
             self.path.to_str().context("Non-UTF-8 path")?,
         ])?;
-        let attrs: Vec<_> = attrs.split(|b| *b == 0).collect();
-        for entry in attrs.chunks_exact(3) {
-            if entry[2] != b"unspecified" && entry[2] != b"unset" {
+        let entries: Vec<_> = attrs.split(|b| *b == 0).collect();
+        for entry in entries.chunks_exact(3) {
+            let safe_text = entry[1] == b"text" && (entry[2] == b"set" || entry[2] == b"auto");
+            let safe_eol = entry[1] == b"eol" && entry[2] == b"lf";
+            if entry[2] != b"unspecified" && entry[2] != b"unset" && !safe_text && !safe_eol {
                 bail!(
                     "Unsupported text transformation attribute: {}",
                     String::from_utf8_lossy(entry[1])
@@ -285,7 +289,10 @@ impl Repo {
         let config = self.git(&["config", "--null", "--list"])?;
         let work_stamp = WorkStamp::of(&meta);
         let cached_work = self.cache.borrow().as_ref().and_then(|cache| {
-            (!validate && cache.work_stamp == work_stamp && cache.config == config)
+            (!validate
+                && cache.work_stamp == work_stamp
+                && cache.config == config
+                && cache.attrs == attrs)
                 .then(|| cache.snapshot.work.clone())
         });
         let work = if let Some(work) = cached_work {
@@ -335,6 +342,7 @@ impl Repo {
             snapshot: snapshot.clone(),
             work_stamp,
             config,
+            attrs,
         });
         Ok(snapshot)
     }

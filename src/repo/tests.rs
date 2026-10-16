@@ -289,6 +289,35 @@ fn conflicts_and_transformation_attributes_are_rejected() {
     assert!(f.repo.snapshot().is_err());
 }
 #[test]
+fn byte_preserving_text_attributes_allow_mutations() {
+    for attrs in ["text", "text=auto", "text eol=lf", "text=auto eol=lf"] {
+        let f = Fixture::new("old\n");
+        fs::write(
+            f.dir.path().join(".gitattributes"),
+            format!("file {attrs}\n"),
+        )
+        .unwrap();
+        let repo = Repo::open(f.dir.path(), Path::new("file")).unwrap();
+        f.work("new\n");
+        let staged = repo
+            .mutate(&repo.snapshot().unwrap(), Operation::Stage, &[0, 1])
+            .unwrap();
+        assert_eq!(staged.index, "new\n");
+        let unstaged = repo.mutate(&staged, Operation::Unstage, &[0, 1]).unwrap();
+        assert_eq!(unstaged.index, "old\n");
+        let discarded = repo.mutate(&unstaged, Operation::Discard, &[0, 1]).unwrap();
+        assert_eq!(discarded.work, "old\n");
+    }
+}
+#[test]
+fn text_attribute_changes_invalidate_cached_conversion_check() {
+    let f = Fixture::new("old\r\n");
+    fs::write(f.dir.path().join(".gitattributes"), "file text\n").unwrap();
+    let error = f.repo.snapshot().unwrap_err().to_string();
+    assert!(error.contains("conversion would change"), "{error}");
+    assert_eq!(fs::read(&f.repo.path).unwrap(), b"old\r\n");
+}
+#[test]
 fn repository_context_is_invocation_not_target() {
     let f = Fixture::new("old\n");
     let outside = tempfile::tempdir().unwrap();
