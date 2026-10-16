@@ -25,6 +25,22 @@ Replacement deletions and additions are independently selectable. Submission foc
 the next remaining change below, falling back upward; a message indicates completion.
 Hunk highlighting includes only changed rows, not context.
 
+## Highlight colors
+
+Selection defaults to dark gray (`#404040`), and the cursor to lighter gray
+(`#505050`). Override either using environment variables (six-digit RGB hex,
+with or without `#`):
+
+```sh
+export GIT_DIFFTUI_SELECTION_BG='#404040'
+export GIT_DIFFTUI_CURSOR_BG='#505050'
+```
+
+Add these to your shell configuration to persist them. Alternatives for selection:
+neutral slate `#4A5568` or muted teal `#365F5C`. Added/deleted text keeps its
+green/red foreground; the cursor background takes precedence within a selection.
+Hunk-mode highlighting uses the cursor background color.
+
 ## Safety and scope
 
 Supports partial staging and unstaging of existing ordinary UTF-8 text files

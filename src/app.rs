@@ -1,6 +1,7 @@
 use crate::{
     diff::{Diff, Kind},
     repo::{Operation, Snapshot},
+    theme::Theme,
 };
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -44,6 +45,7 @@ pub enum Intent {
     Mutate(Request),
 }
 pub struct App {
+    pub theme: Theme,
     pub snapshot: Snapshot,
     pub diffs: [Diff; 2],
     pub nav: [Nav; 2],
@@ -66,6 +68,7 @@ impl App {
             ..Nav::default()
         });
         Self {
+            theme: Theme::default(),
             snapshot,
             diffs,
             nav,
@@ -423,14 +426,14 @@ impl App {
                     && diff.actionable(i)
                     && hunk.as_ref().is_some_and(|h| h.contains(&i))
                 {
-                    style = style.bg(Color::Rgb(55, 55, 55));
+                    style = style.bg(self.theme.cursor_bg);
                 } else if nav.cursor == Some(i) {
-                    style = style.bg(Color::Rgb(65, 65, 65));
+                    style = style.bg(self.theme.cursor_bg);
                 } else if nav.anchor.is_some_and(|a| {
                     nav.cursor
                         .is_some_and(|c| (a.min(c)..=a.max(c)).contains(&i))
                 }) {
-                    style = style.bg(Color::Rgb(35, 40, 50));
+                    style = style.bg(self.theme.selection_bg);
                 }
                 let number = if row.kind == Kind::Remove {
                     row.old + 1
@@ -712,7 +715,7 @@ mod tests {
         let buffer = terminal.backend().buffer();
         for (i, row) in a.diffs[0].rows.iter().enumerate() {
             let bg = buffer[(0, i as u16 + 2)].bg;
-            assert_eq!(bg == Color::Rgb(55, 55, 55), row.kind != Kind::Context);
+            assert_eq!(bg == a.theme.cursor_bg, row.kind != Kind::Context);
         }
     }
     #[test]

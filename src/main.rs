@@ -1,6 +1,7 @@
 mod app;
 mod diff;
 mod repo;
+mod theme;
 
 use anyhow::{bail, Context, Result};
 use app::{App, Intent};
@@ -31,6 +32,7 @@ fn run() -> Result<()> {
     let cwd = std::env::current_dir()?.canonicalize()?;
     let repo = repo::Repo::open(&cwd, &PathBuf::from(&args[0]))?;
     let mut app = App::new(repo.cached_snapshot());
+    app.theme = theme::Theme::from_env()?;
     let name = args[0].to_string_lossy();
     enable_raw_mode().context("Cannot enter terminal raw mode")?;
     let _guard = TerminalGuard;
