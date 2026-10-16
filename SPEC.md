@@ -35,14 +35,15 @@ git-difftui <file>
 
 ## Supported inputs and scope
 
-Only support content modifications to **tracked, existing, ordinary text files**.
-The file must be an existing tracked file, not a new addition relative to HEAD,
-not a staged deletion, and not a file deleted from disk.
+Support partial content staging and unstaging of **existing, ordinary text files
+already present in Git's index**: both files present in HEAD and newly added files
+absent from HEAD. Repositories without a first commit are supported. The file must
+exist on disk and must not be a staged deletion. Do not add untracked files or
+provide whole-file management operations.
 
 Reject or clearly report as unsupported:
 
 - Untracked files. Tell the user to track the file before opening it; do not track it automatically.
-- Newly added files, including files already added to the index but not present in HEAD.
 - Deleted files, whether the deletion is staged or unstaged.
 - Renames and other file-level operations.
 - Binary files.
@@ -55,13 +56,16 @@ application action. Do not stage file-level metadata changes as a side effect of
 a content operation.
 
 Content operations **may leave a file empty**. Preserve both its filesystem path
-and its index entry: empty content is allowed, but file deletion is not.
+and its index entry: empty content is allowed, but file deletion is not. Unstaging
+all content of an indexed addition leaves an empty indexed file, not an untracked
+file. Its existing index mode is preserved; no new file-level metadata is staged.
 
 ## Git content model
 
 Use three versions of the target file:
 
-- **HEAD:** committed content.
+- **HEAD:** committed content, or an empty content baseline for an indexed addition
+  absent from HEAD (including before the first commit).
 - **Index:** staged content.
 - **Working tree:** content on disk.
 
@@ -291,6 +295,8 @@ are demonstrated:
 7. Discard only the requested unstaged content after explicit confirmation; cancel
    safely and preserve staged content.
 8. Permit empty content without removing a filesystem path or index entry.
+   Cover partial staging/unstaging of indexed additions, including before the first
+   commit, and unstaging all added content while retaining an empty index entry.
 9. Reject unsupported input types without mutation; untracked-file errors ask the
    user to track the file first.
 10. Refresh automatically outside selection, defer refresh during selection, and

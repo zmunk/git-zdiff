@@ -38,6 +38,59 @@ impl Fixture {
     }
 }
 #[test]
+fn indexed_additions_support_partial_operations_with_or_without_head() {
+    for committed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["config", "core.autocrlf", "false"]);
+        if committed {
+            git(
+                dir.path(),
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "initial",
+                ],
+            );
+        }
+        fs::write(dir.path().join("file"), "one\r\ntwo").unwrap();
+        fs::write(dir.path().join("other"), "unrelated\n").unwrap();
+        assert!(Repo::open(dir.path(), Path::new("file")).is_err());
+        git(dir.path(), &["add", "."]);
+        let repo = Repo::open(dir.path(), Path::new("file")).unwrap();
+        let f = Fixture { dir, repo };
+        let initial = f.state();
+        assert_eq!(initial.head, "");
+        assert!(initial.head_oid.is_empty());
+        let s = f.apply(Operation::Unstage, &[0]);
+        assert_eq!(s.index, "two");
+        assert_eq!(s.work, "one\r\ntwo");
+        let s = f.apply(Operation::Unstage, &[0]);
+        assert_eq!(s.index, "");
+        assert!(!git(f.dir.path(), &["ls-files", "--stage", "file"]).is_empty());
+        assert!(f.repo.path.is_file());
+        let s = f.apply(Operation::Stage, &[0]);
+        assert_eq!(s.index, "one\r\n");
+        let s = f.apply(Operation::Stage, &[1]);
+        assert_eq!(s.index, initial.index);
+        assert_eq!(s.work, initial.work);
+        assert_eq!(s.mode, initial.mode);
+        assert_eq!(git(f.dir.path(), &["show", ":other"]), "unrelated\n");
+
+        // Removing the entry externally must not let a stale action re-add it.
+        let captured = f.state();
+        git(f.dir.path(), &["update-index", "--force-remove", "file"]);
+        assert!(f.repo.mutate(&captured, Operation::Unstage, &[0]).is_err());
+        assert!(git(f.dir.path(), &["ls-files", "file"]).is_empty());
+    }
+}
+
+#[test]
 fn cached_refresh_loads_only_changed_components() {
     let f = Fixture::new("old\n");
     assert_eq!(f.repo.reads.get(), (1, 1));
@@ -253,7 +306,7 @@ fn unsupported_inputs_are_rejected_without_writes() {
         .to_string();
     assert!(err.contains("track the file"));
     git(f.dir.path(), &["add", "untracked"]);
-    assert!(Repo::open(f.dir.path(), Path::new("untracked")).is_err());
+    assert!(Repo::open(f.dir.path(), Path::new("untracked")).is_ok());
     f.work("nul\0binary");
     assert!(f.repo.snapshot().is_err());
     fs::write(&f.repo.path, [0xff]).unwrap();
@@ -332,7 +385,7 @@ fn repository_context_is_invocation_not_target() {
     assert!(git(f.dir.path(), &["ls-files", "sub/file"]).is_empty());
 }
 #[test]
-fn unborn_head_reports_required_committed_baseline_without_mutation() {
+fn unborn_head_accepts_empty_indexed_addition_without_mutation() {
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q"]);
     let file = dir.path().join("hi");
@@ -342,13 +395,12 @@ fn unborn_head_reports_required_committed_baseline_without_mutation() {
     assert!(!dir.path().join(".git/index").exists());
     git(dir.path(), &["add", "hi"]);
     let index_before = fs::read(dir.path().join(".git/index")).unwrap();
-    let error = Repo::open(dir.path(), Path::new("hi")).err().unwrap();
-    let message = format!("{error:#}");
-    assert!(
-        message.contains("repositories without commits"),
-        "{message}"
-    );
-    assert!(message.contains("commit the file before opening it"));
+    let repo = Repo::open(dir.path(), Path::new("hi")).unwrap();
+    let snapshot = repo.snapshot().unwrap();
+    assert_eq!(snapshot.head, "");
+    assert!(snapshot.head_oid.is_empty());
+    assert_eq!(snapshot.index, "");
+    assert_eq!(snapshot.work, "");
     assert_eq!(
         fs::read(dir.path().join(".git/index")).unwrap(),
         index_before

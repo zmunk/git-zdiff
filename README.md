@@ -27,9 +27,13 @@ Hunk highlighting includes only changed rows, not context.
 
 ## Safety and scope
 
-Only tracked, existing ordinary UTF-8 text files already present in HEAD are
-supported. Binary/NUL-containing text, symlinks, submodules, conflicts, deletions,
-new additions, and mode/type changes are refused. Non-UTF-8 paths are unsupported.
+Supports partial staging and unstaging of existing ordinary UTF-8 text files
+already in Git's index, including newly added files absent from HEAD and repositories
+without a first commit. Indexed additions use an empty HEAD baseline; unstaging all
+their content preserves an empty index entry. The app does not add untracked files
+or provide whole-file management operations. Binary/NUL-containing text, symlinks,
+submodules, conflicts, deletions, and mode/type changes are refused. Non-UTF-8 paths
+are unsupported.
 Git clean filters, encoding/ident/text/EOL attributes and implicit EOL conversion
 are conservatively refused rather than silently transforming content. Byte-exact
 LF and CRLF text, including missing final newlines, are supported. Rows retain

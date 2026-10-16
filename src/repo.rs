@@ -199,8 +199,33 @@ impl Repo {
         text(self.git(&["cat-file", "blob", oid])?)
     }
     fn head_tree(&self) -> Result<Vec<u8>> {
-        self.git(&["ls-tree", "--full-tree", "-z", "HEAD", "--", &self.spec])
-            .context("Cannot read the committed baseline (HEAD): newly added files and repositories without commits are unsupported; commit the file before opening it")
+        let head = self
+            .command(&["rev-parse", "--verify", "--quiet", "HEAD"])
+            .output()
+            .context("Cannot resolve HEAD")?;
+        if head.status.code() == Some(1) {
+            // Only an unborn branch has an empty baseline. Do not hide corrupt
+            // refs, inaccessible objects, or other Git failures as empty content.
+            let branch = self.git(&["symbolic-ref", "--quiet", "HEAD"])?;
+            let branch = std::str::from_utf8(&branch)?.trim_end();
+            let exists = self
+                .command(&["show-ref", "--verify", "--quiet", branch])
+                .output()
+                .context("Cannot inspect unborn branch")?;
+            if exists.status.code() == Some(1) {
+                return Ok(Vec::new());
+            }
+            bail!("Cannot read the committed baseline (HEAD)");
+        }
+        if !head.status.success() {
+            bail!(
+                "Cannot resolve HEAD: {}",
+                String::from_utf8_lossy(&head.stderr).trim()
+            );
+        }
+        let oid = std::str::from_utf8(&head.stdout)?.trim();
+        self.git(&["ls-tree", "--full-tree", "-z", oid, "--", &self.spec])
+            .context("Cannot read the committed baseline (HEAD)")
     }
     pub fn cached_snapshot(&self) -> Snapshot {
         self.cache
@@ -219,11 +244,11 @@ impl Repo {
         let entries = self.git(&["ls-files", "--stage", "-z", "--", &self.spec])?;
         if entries.is_empty() {
             // Distinguish staged deletion from a genuinely untracked file.
-            let head = self.head_tree().context("File is not in the index: track the file before opening it; a committed baseline is also required")?;
+            let head = self.head_tree()?;
             if !head.is_empty() {
                 bail!("Staged deletions are unsupported");
             }
-            bail!("Untracked file: track the file before opening it (new additions must also be committed)");
+            bail!("Untracked file: track the file before opening it");
         }
         let records: Vec<_> = entries
             .split(|b| *b == 0)
@@ -242,14 +267,17 @@ impl Repo {
             bail!("Symlinks, submodules and non-ordinary files are unsupported");
         }
         let tree = self.head_tree()?;
-        if tree.is_empty() {
-            bail!("Newly added files and renames are unsupported: file must exist in HEAD");
-        }
-        let tree_header = std::str::from_utf8(tree.split(|b| *b == b'\t').next().unwrap())?;
-        let tree_fields: Vec<_> = tree_header.split_whitespace().collect();
-        if tree_fields.len() != 3 || tree_fields[0] != mode || tree_fields[1] != "blob" {
-            bail!("File-mode or file-type changes are unsupported");
-        }
+        let head_oid = if tree.is_empty() {
+            // Missing in HEAD: an indexed addition uses an empty text baseline.
+            String::new()
+        } else {
+            let tree_header = std::str::from_utf8(tree.split(|b| *b == b'\t').next().unwrap())?;
+            let tree_fields: Vec<_> = tree_header.split_whitespace().collect();
+            if tree_fields.len() != 3 || tree_fields[0] != mode || tree_fields[1] != "blob" {
+                bail!("File-mode or file-type changes are unsupported");
+            }
+            tree_fields[2].to_owned()
+        };
         let meta = fs::symlink_metadata(&self.path)
             .context("Deleted or unavailable working file is unsupported")?;
         if !meta.file_type().is_file() {
@@ -321,8 +349,12 @@ impl Repo {
             }
             work
         };
-        let head = self.blob(tree_fields[2])?;
-        let index = if fields[1] == tree_fields[2] {
+        let head = if head_oid.is_empty() {
+            String::new()
+        } else {
+            self.blob(&head_oid)?
+        };
+        let index = if fields[1] == head_oid {
             head.clone()
         } else {
             self.blob(fields[1])?
@@ -331,7 +363,7 @@ impl Repo {
             head,
             index,
             work,
-            head_oid: tree_fields[2].to_owned(),
+            head_oid,
             index_oid: fields[1].to_owned(),
             mode: mode.to_owned(),
             dev: meta.dev(),
