@@ -20,7 +20,19 @@ pub struct Nav {
     pub mode: Mode,
     pub anchor: Option<usize>,
     pub scroll: usize,
+    pub top_padding: usize,
     pub follow_cursor: bool,
+}
+impl Nav {
+    fn center_target(&self, diff: &Diff) -> Option<usize> {
+        let cursor = self.cursor?;
+        if self.mode == Mode::Hunk {
+            if let Some(hunk) = diff.hunk(cursor).map(|h| &diff.hunks[h]) {
+                return Some(hunk.start + (hunk.len() - 1) / 2);
+            }
+        }
+        Some(cursor)
+    }
 }
 impl Default for Nav {
     fn default() -> Self {
@@ -29,6 +41,7 @@ impl Default for Nav {
             mode: Mode::Hunk,
             anchor: None,
             scroll: 0,
+            top_padding: 0,
             follow_cursor: true,
         }
     }
@@ -51,6 +64,7 @@ pub struct App {
     pub nav: [Nav; 2],
     pub tab: usize,
     pub preview_scroll: usize,
+    pub preview_top_padding: usize,
     pub horizontal: u16,
     pub message: String,
     pub valid: bool,
@@ -74,6 +88,7 @@ impl App {
             nav,
             tab: 0,
             preview_scroll: 0,
+            preview_top_padding: 0,
             horizontal: 0,
             message: String::new(),
             valid: true,
@@ -135,23 +150,35 @@ impl App {
     }
     pub fn scroll_page(&mut self, down: bool) {
         let amount = (self.viewport_height / 2).max(1);
-        let (scroll, len) = if self.tab == 2 {
+        let (scroll, padding, len) = if self.tab == 2 {
             (
                 &mut self.preview_scroll,
+                &mut self.preview_top_padding,
                 self.snapshot.index.lines().count(),
             )
         } else {
-            self.nav[self.tab].follow_cursor = false;
+            let nav = &mut self.nav[self.tab];
+            nav.follow_cursor = false;
             (
-                &mut self.nav[self.tab].scroll,
+                &mut nav.scroll,
+                &mut nav.top_padding,
                 self.diffs[self.tab].rows.len(),
             )
         };
-        *scroll = if down {
-            scroll.saturating_add(amount).min(len.saturating_sub(1))
+        let origin = *scroll as i128 - *padding as i128;
+        let delta = if down {
+            amount as i128
         } else {
-            scroll.saturating_sub(amount)
+            -(amount as i128)
         };
+        let max = (len as i128 + 2 - self.viewport_height as i128).max(0);
+        let origin = if len == 0 {
+            0
+        } else {
+            (origin + delta).clamp(-2, max)
+        };
+        *scroll = origin.max(0) as usize;
+        *padding = (-origin).max(0) as usize;
     }
     pub fn cancel_selection(&mut self) {
         for nav in &mut self.nav {
@@ -217,18 +244,24 @@ impl App {
                 self.horizontal = self.horizontal.saturating_add(4);
             }
             KeyCode::Char('j') | KeyCode::Down if self.tab == 2 => {
+                self.preview_top_padding = 0;
                 self.preview_scroll = (self.preview_scroll + 1)
                     .min(self.snapshot.index.lines().count().saturating_sub(1));
             }
             KeyCode::Char('k') | KeyCode::Up if self.tab == 2 => {
+                self.preview_top_padding = 0;
                 self.preview_scroll = self.preview_scroll.saturating_sub(1);
             }
             _ if self.tab == 2 => {}
             KeyCode::Esc => {
                 let nav = &mut self.nav[self.tab];
                 if nav.anchor.take().is_none() {
-                    if let Some(cursor) = nav.cursor {
-                        nav.scroll = cursor.saturating_sub(self.viewport_height / 2);
+                    if let Some(target) = nav.center_target(&self.diffs[self.tab]) {
+                        (nav.scroll, nav.top_padding) = centered_viewport(
+                            target,
+                            self.diffs[self.tab].rows.len(),
+                            self.viewport_height,
+                        );
                         nav.follow_cursor = false;
                     }
                 }
@@ -357,7 +390,15 @@ impl App {
         self.viewport_height = body.height as usize;
         if self.tab == 2 {
             let lines: Vec<_> = self.snapshot.index.split_inclusive('\n').collect();
-            self.preview_scroll = self.preview_scroll.min(lines.len().saturating_sub(1));
+            self.preview_scroll = self.preview_scroll.min(
+                lines.len().saturating_sub(1).max(
+                    lines
+                        .len()
+                        .saturating_add(2)
+                        .saturating_sub(body.height as usize),
+                ),
+            );
+            let top_padding = self.preview_top_padding.min(body.height as usize);
             if !self.valid {
                 frame.render_widget(
                     Paragraph::new("Index content unavailable: resolve the refresh error below."),
@@ -369,13 +410,13 @@ impl App {
                 for (screen, text) in lines
                     .iter()
                     .skip(self.preview_scroll)
-                    .take(body.height as usize)
+                    .take(body.height as usize - top_padding)
                     .enumerate()
                 {
                     self.render_row(
                         frame,
                         body,
-                        screen,
+                        screen + top_padding,
                         &format!(
                             "{:>5}   {}",
                             self.preview_scroll + screen + 1,
@@ -392,16 +433,18 @@ impl App {
                 .cursor
                 .and_then(|i| diff.hunk(i))
                 .map(|h| diff.hunks[h].clone());
-            if let Some(cursor) = nav.cursor.filter(|_| nav.follow_cursor) {
-                if cursor < nav.scroll {
-                    nav.scroll = cursor;
-                }
-                if cursor >= nav.scroll + body.height as usize {
-                    nav.scroll = cursor.saturating_sub(body.height.saturating_sub(1) as usize);
-                }
+            if let Some(target) = nav.center_target(diff).filter(|_| nav.follow_cursor) {
+                (nav.scroll, nav.top_padding) =
+                    centered_viewport(target, diff.rows.len(), body.height as usize);
             }
-            nav.scroll = nav.scroll.min(diff.rows.len().saturating_sub(1));
+            nav.scroll = nav.scroll.min(
+                diff.rows
+                    .len()
+                    .saturating_add(2)
+                    .saturating_sub(body.height as usize),
+            );
             let scroll = nav.scroll;
+            let top_padding = nav.top_padding.min(body.height as usize);
             if diff.rows.is_empty() {
                 frame.render_widget(Paragraph::new("Empty file — no content changes"), body);
             }
@@ -410,7 +453,7 @@ impl App {
                 .iter()
                 .enumerate()
                 .skip(scroll)
-                .take(body.height as usize)
+                .take(body.height as usize - top_padding)
                 .enumerate()
             {
                 let (mark, color) = match row.kind {
@@ -441,7 +484,12 @@ impl App {
                     row.new + 1
                 };
                 let line = format!("{number:>5} {mark} {}", display_text(&row.text));
-                let rect = Rect::new(body.x, body.y + screen as u16, body.width, 1);
+                let rect = Rect::new(
+                    body.x,
+                    body.y + (screen + top_padding) as u16,
+                    body.width,
+                    1,
+                );
                 let content = Paragraph::new(line)
                     .style(style)
                     .scroll((0, self.horizontal));
@@ -510,6 +558,24 @@ impl App {
         );
     }
 }
+// Return the first real row and the blank rows above it. Signed viewport
+// origins allow centering near the start without inventing diff rows.
+fn centered_viewport(cursor: usize, len: usize, height: usize) -> (usize, usize) {
+    if height == 0 || len == 0 {
+        return (0, 0);
+    }
+    let ideal = cursor as i128 - (height / 2) as i128;
+    let end = len as i128 - height as i128;
+    let (min, max) = if len <= height {
+        // Keep short files visible, but never add more than two blank rows above.
+        (end.max(-2), 0)
+    } else {
+        (-2, end + 2)
+    };
+    let origin = ideal.clamp(min, max);
+    (origin.max(0) as usize, (-origin).max(0) as usize)
+}
+
 fn display_text(text: &str) -> String {
     let no_newline = !text.ends_with('\n');
     let text = text.strip_suffix('\n').unwrap_or(text);
@@ -695,7 +761,10 @@ mod tests {
         assert_eq!(a.nav[0].scroll, scroll);
         a.key(KeyCode::Esc);
         terminal.draw(|f| a.draw(f, "test")).unwrap();
-        assert_eq!(a.nav[0].scroll, cursor.unwrap() - a.viewport_height / 2);
+        assert_eq!(
+            a.nav[0].scroll,
+            a.nav[0].center_target(&a.diffs[0]).unwrap() - a.viewport_height / 2
+        );
         a.key(KeyCode::Tab);
         key(&mut a, 'v');
         let selected = a.selected();
@@ -707,6 +776,128 @@ mod tests {
         assert_eq!(a.nav[0].scroll, scroll);
     }
     #[test]
+    fn manual_scrolling_reaches_both_padded_boundaries() {
+        use ratatui::{backend::TestBackend, Terminal};
+        for tab in 0..3 {
+            let mut a = app();
+            let text = (0..100).map(|i| format!("line {i}\n")).collect::<String>();
+            a.snapshot.head = text.clone();
+            a.snapshot.index = text.clone();
+            a.snapshot.work = text.replace("line 50\n", "changed\n");
+            a = App::new(a.snapshot);
+            a.tab = tab;
+            let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
+            terminal.draw(|f| a.draw(f, "test")).unwrap();
+            let cursor = if tab < 2 { a.nav[tab].cursor } else { None };
+            for down in [false, true, false] {
+                for _ in 0..30 {
+                    a.scroll_page(down);
+                    terminal.draw(|f| a.draw(f, "test")).unwrap();
+                }
+                let (scroll, padding, len) = if tab == 2 {
+                    (a.preview_scroll, a.preview_top_padding, 100)
+                } else {
+                    assert_eq!(a.nav[tab].cursor, cursor);
+                    (
+                        a.nav[tab].scroll,
+                        a.nav[tab].top_padding,
+                        a.diffs[tab].rows.len(),
+                    )
+                };
+                if down {
+                    assert_eq!(padding, 0);
+                    assert_eq!(scroll + a.viewport_height, len + 2);
+                } else {
+                    assert_eq!((scroll, padding), (0, 2));
+                    let buffer = terminal.backend().buffer();
+                    for y in 2..4 {
+                        for x in 0..100 {
+                            assert_eq!(buffer[(x, y)].symbol(), " ");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn hunk_center_target_is_independent_of_cursor_position() {
+        let mut a = app();
+        let range = a.diffs[0].hunks[0].clone();
+        let middle = range.start + (range.len() - 1) / 2;
+        for cursor in range.filter(|i| a.diffs[0].actionable(*i)) {
+            a.nav[0].cursor = Some(cursor);
+            a.nav[0].mode = Mode::Hunk;
+            assert_eq!(a.nav[0].center_target(&a.diffs[0]), Some(middle));
+            a.nav[0].mode = Mode::Line;
+            assert_eq!(a.nav[0].center_target(&a.diffs[0]), Some(cursor));
+        }
+    }
+    #[test]
+    fn centering_limits_blank_rows_and_keeps_short_files_visible() {
+        assert_eq!(centered_viewport(50, 100, 20), (40, 0));
+        assert_eq!(centered_viewport(0, 100, 20), (0, 2));
+        assert_eq!(centered_viewport(99, 100, 20), (82, 0));
+        assert_eq!(centered_viewport(0, 5, 20), (0, 2));
+        assert_eq!(centered_viewport(4, 5, 20), (0, 2));
+        assert_eq!(centered_viewport(19, 20, 20), (0, 0));
+        assert_eq!(centered_viewport(0, 0, 20), (0, 0));
+        assert_eq!(centered_viewport(0, 100, 0), (0, 0));
+        for height in 1..30 {
+            for len in 1..100 {
+                for cursor in 0..len {
+                    let (scroll, padding) = centered_viewport(cursor, len, height);
+                    assert!(padding <= 2);
+                    if len > height {
+                        assert!((scroll + height).saturating_sub(len) <= 2);
+                    }
+                    assert!((scroll..scroll + height - padding).contains(&cursor));
+                }
+            }
+        }
+    }
+    #[test]
+    fn navigation_and_submission_recenter_in_both_views_and_modes() {
+        use ratatui::{backend::TestBackend, Terminal};
+        for tab in 0..2 {
+            for mode in [Mode::Line, Mode::Hunk] {
+                let mut a = app();
+                let text = (0..100).map(|i| format!("line {i}\n")).collect::<String>();
+                let changed = text
+                    .replace("line 30\n", "changed 30\n")
+                    .replace("line 50\n", "changed 50\n")
+                    .replace("line 70\n", "changed 70\n");
+                a.snapshot.head = text.clone();
+                a.snapshot.index = if tab == 0 {
+                    text.clone()
+                } else {
+                    changed.clone()
+                };
+                a.snapshot.work = changed;
+                a = App::new(a.snapshot);
+                a.tab = tab;
+                a.nav[tab].mode = mode;
+                let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
+                for action in ['j', 'k', 'j', ' '] {
+                    // Navigation must also resume following after manual scrolling.
+                    a.scroll_page(true);
+                    if action == ' ' {
+                        submit(&mut a);
+                    } else {
+                        key(&mut a, action);
+                    }
+                    terminal.draw(|f| a.draw(f, "test")).unwrap();
+                    let nav = &a.nav[tab];
+                    assert!(nav.follow_cursor);
+                    assert_eq!(nav.top_padding, 0);
+                    assert_eq!(
+                        nav.scroll,
+                        nav.center_target(&a.diffs[tab]).unwrap() - a.viewport_height / 2
+                    );
+                }
+            }
+        }
+    }
+    #[test]
     fn hunk_highlight_excludes_context() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut a = app();
@@ -714,7 +905,7 @@ mod tests {
         terminal.draw(|f| a.draw(f, "test")).unwrap();
         let buffer = terminal.backend().buffer();
         for (i, row) in a.diffs[0].rows.iter().enumerate() {
-            let bg = buffer[(0, i as u16 + 2)].bg;
+            let bg = buffer[(0, (i + a.nav[0].top_padding) as u16 + 2)].bg;
             assert_eq!(bg == a.theme.cursor_bg, row.kind != Kind::Context);
         }
     }
